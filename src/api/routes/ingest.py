@@ -8,8 +8,11 @@ from sqlalchemy.orm import Session
 from src.db.session import SessionLocal
 from src.models.subscription import Subscription
 from src.queue.redis_conn import delivery_queue
+from src.workers.delivery_worker import process_delivery
+from rq import Retry
 
 router = APIRouter()
+
 
 def get_db():
     db = SessionLocal()
@@ -17,6 +20,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
 
 @router.post(
     "/ingest/{subscription_id}",
@@ -43,11 +47,14 @@ async def ingest_webhook(
 
     # 3. Enqueue the delivery job (subscription_id, payload, event type)
     delivery_queue.enqueue(
-        "src.workers.delivery_worker.process_delivery",
+        process_delivery,
         subscription_id,
         payload,
         x_event_type,
-        retry=True,
+        retry=Retry(
+            max=5,
+            interval=[10, 30, 60, 300, 900]  # seconds: 10s,30s,1m,5m,15m
+        ),
     )
 
     # 4. Acknowledge immediately

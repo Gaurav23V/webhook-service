@@ -1,18 +1,15 @@
-import os
+import uuid
 from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from src.db.session import SessionLocal
 from src.models.subscription import Subscription
 from src.queue.redis_conn import delivery_queue
-from src.workers.delivery_worker import process_delivery
-from rq import Retry
 
 router = APIRouter()
-
 
 def get_db():
     db = SessionLocal()
@@ -20,7 +17,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
 
 @router.post(
     "/ingest/{subscription_id}",
@@ -34,7 +30,7 @@ async def ingest_webhook(
     x_signature: str | None = Header(None),
     db: Session = Depends(get_db),
 ):
-    # 1. Verify subscription exists
+    # 1) verify subscription
     sub = db.query(Subscription).get(subscription_id)
     if not sub:
         raise HTTPException(
@@ -42,20 +38,25 @@ async def ingest_webhook(
             detail="Subscription not found",
         )
 
-    # 2. Parse JSON payload
+    # 2) read payload
     payload = await request.json()
 
-    # 3. Enqueue the delivery job (subscription_id, payload, event type)
+    # 3) generate a webhook-level ID and initial attempt=1
+    webhook_id = uuid.uuid4()
+
+    # 4) enqueue the first delivery attempt (no built-in RQ retry here)
     delivery_queue.enqueue(
-        process_delivery,
+        "src.workers.delivery_worker.process_delivery",
         subscription_id,
         payload,
         x_event_type,
-        retry=Retry(
-            max=5,
-            interval=[10, 30, 60, 300, 900]  # seconds: 10s,30s,1m,5m,15m
-        ),
+        x_signature,
+        webhook_id,
+        1,  # first attempt
     )
 
-    # 4. Acknowledge immediately
-    return Response(status_code=status.HTTP_202_ACCEPTED)
+    # 5) return the webhook_id so clients can query status
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"webhook_id": str(webhook_id)},
+    )

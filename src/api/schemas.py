@@ -1,6 +1,8 @@
 from typing import List, Optional
 from uuid import UUID
+from datetime import datetime
 from pydantic import BaseModel, AnyHttpUrl
+
 
 class SubscriptionBase(BaseModel):
     target_url: AnyHttpUrl
@@ -17,6 +19,33 @@ class SubscriptionUpdate(BaseModel):
 
 class SubscriptionOut(SubscriptionBase):
     id: UUID
+
+    class Config:
+        orm_mode = True
+
+class DeliveryAttempt(BaseModel):
+    id: UUID
+    webhook_id: UUID
+    subscription_id: UUID
+    target_url: AnyHttpUrl
+    timestamp: datetime
+    attempt_number: int
+    outcome: str
+    status_code: Optional[int] = None
+    error: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+class StatusResponse(BaseModel):
+    webhook_id: UUID
+    subscription_id: UUID
+    total_attempts: int
+    final_outcome: str
+    last_attempt_at: datetime
+    last_status_code: Optional[int] = None
+    error: Optional[str] = None
+    recent_attempts: List[DeliveryAttempt]
 
     class Config:
         orm_mode = True

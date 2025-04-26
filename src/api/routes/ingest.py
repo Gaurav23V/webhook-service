@@ -1,22 +1,13 @@
 import uuid
 from uuid import UUID
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from sqlalchemy.orm import Session
 
-from src.db.session import SessionLocal
-from src.models.subscription import Subscription
+from src.cache.subscription_cache import get_subscription
 from src.queue.redis_conn import delivery_queue
 
 router = APIRouter()
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.post(
     "/ingest/{subscription_id}",
@@ -28,23 +19,20 @@ async def ingest_webhook(
     request: Request,
     x_event_type: str | None = Header(None),
     x_signature: str | None = Header(None),
-    db: Session = Depends(get_db),
 ):
-    # 1) verify subscription
-    sub = db.query(Subscription).get(subscription_id)
-    if not sub:
+    # 1) Cache-first lookup (falls back to DB if needed)
+    sub_data = get_subscription(subscription_id)
+    if not sub_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Subscription not found",
         )
 
-    # 2) read payload
+    # 2) Read payload
     payload = await request.json()
 
-    # 3) generate a webhook-level ID and initial attempt=1
+    # 3) Generate a webhook_id & enqueue first attempt
     webhook_id = uuid.uuid4()
-
-    # 4) enqueue the first delivery attempt (no built-in RQ retry here)
     delivery_queue.enqueue(
         "src.workers.delivery_worker.process_delivery",
         subscription_id,
@@ -52,10 +40,10 @@ async def ingest_webhook(
         x_event_type,
         x_signature,
         webhook_id,
-        1,  # first attempt
+        1,  # attempt number
     )
 
-    # 5) return the webhook_id so clients can query status
+    # 4) Return 202 + webhook_id for status checks
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={"webhook_id": str(webhook_id)},

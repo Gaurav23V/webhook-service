@@ -5,19 +5,16 @@ import requests
 from sqlalchemy.orm import Session
 
 from src.db.session import SessionLocal
-from src.models.subscription import Subscription
 from src.models.delivery_log import DeliveryLog
 from src.queue.redis_conn import delivery_queue
+from src.cache.subscription_cache import get_subscription
 
-# configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# config & backoff
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "5"))
 MAX_ATTEMPTS = 5
 BACKOFF_SCHEDULE = [10, 30, 60, 300, 900]  # in seconds
-
 
 def process_delivery(
     subscription_id,
@@ -28,31 +25,31 @@ def process_delivery(
     attempt,
 ):
     """
-    1) Attempt to POST to the subscription target_url.
-    2) On success or final failure, record a DeliveryLog row.
-    3) On intermediate failure (attempt < MAX_ATTEMPTS), record the failure,
-       schedule the next attempt after BACKOFF_SCHEDULE[attempt-1] seconds.
+    1) Fetch subscription from Redis cache (fallback to DB).
+    2) Attempt HTTP POST to target_url.
+    3) Log each attempt to Postgres.
+    4) If attempt < MAX, reschedule with exponential backoff.
     """
+    # Cache-first subscription lookup
+    sub_data = get_subscription(subscription_id)
+    if not sub_data:
+        logger.error(f"[Delivery] Sub {subscription_id} not found, dropping job")
+        return
+
+    target = sub_data["target_url"]
+    headers = {"Content-Type": "application/json"}
+    if event_type:
+        headers["X-Event-Type"] = event_type
+    if signature:
+        headers["X-Signature"] = signature
+
     db: Session = SessionLocal()
     try:
-        sub = db.query(Subscription).get(subscription_id)
-        if not sub:
-            logger.error(
-                f"Subscription {subscription_id} not found, dropping job")
-            return
-
-        target = sub.target_url
-        headers = {"Content-Type": "application/json"}
-        if event_type:
-            headers["X-Event-Type"] = event_type
-        if signature:
-            headers["X-Signature"] = signature
-
         status_code = None
         error_details = None
         outcome = None
 
-        # perform the POST
+        # Perform the POST
         try:
             resp = requests.post(
                 target,
@@ -61,34 +58,35 @@ def process_delivery(
                 timeout=HTTP_TIMEOUT,
             )
             status_code = resp.status_code
-            if 200 <= resp.status_code < 300:
+            if 200 <= status_code < 300:
                 outcome = "Success"
             else:
                 outcome = "Failed Attempt"
-                error_details = f"HTTP {resp.status_code}"
+                error_details = f"HTTP {status_code}"
                 raise Exception(error_details)
 
         except Exception as exc:
-            # if we can retry, record a failed-attempt log & re-enqueue
+            # Recoverable failure: log & re-enqueue if attempts remain
             if attempt < MAX_ATTEMPTS:
                 outcome = "Failed Attempt"
                 error_details = str(exc)
 
-                # persist this attempt
-                log = DeliveryLog(
-                    webhook_id=webhook_id,
-                    subscription_id=subscription_id,
-                    target_url=target,
-                    timestamp=datetime.utcnow(),
-                    attempt_number=attempt,
-                    outcome=outcome,
-                    status_code=status_code,
-                    error=error_details,
+                # Persist this attempt
+                db.add(
+                    DeliveryLog(
+                        webhook_id=webhook_id,
+                        subscription_id=subscription_id,
+                        target_url=target,
+                        timestamp=datetime.utcnow(),
+                        attempt_number=attempt,
+                        outcome=outcome,
+                        status_code=status_code,
+                        error=error_details,
+                    )
                 )
-                db.add(log)
                 db.commit()
 
-                # schedule the next attempt
+                # Schedule next attempt with backoff
                 delay = BACKOFF_SCHEDULE[attempt - 1]
                 delivery_queue.enqueue_in(
                     timedelta(seconds=delay),
@@ -101,24 +99,23 @@ def process_delivery(
                     attempt + 1,
                 )
                 return
-
             # else fall through to final failure
 
-        # record final log (either success or final failure)
+        # Final log (either success or last failure)
         if outcome is None:
-            # This branch only if the inner try never set outcome (shouldn't happen)
             outcome = "Success"
-        log = DeliveryLog(
-            webhook_id=webhook_id,
-            subscription_id=subscription_id,
-            target_url=target,
-            timestamp=datetime.utcnow(),
-            attempt_number=attempt,
-            outcome=outcome if outcome else "Failure",
-            status_code=status_code,
-            error=error_details,
+        db.add(
+            DeliveryLog(
+                webhook_id=webhook_id,
+                subscription_id=subscription_id,
+                target_url=target,
+                timestamp=datetime.utcnow(),
+                attempt_number=attempt,
+                outcome=outcome,
+                status_code=status_code,
+                error=error_details,
+            )
         )
-        db.add(log)
         db.commit()
 
     finally:

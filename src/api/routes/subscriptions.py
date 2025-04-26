@@ -10,6 +10,7 @@ from src.api.schemas import (
     SubscriptionOut,
     SubscriptionUpdate,
 )
+from src.cache.subscription_cache import cache_subscription, invalidate_subscription
 
 router = APIRouter()
 
@@ -33,6 +34,10 @@ def create_subscription(
     db.add(sub)
     db.commit()
     db.refresh(sub)
+
+    # Cache the new subscription
+    cache_subscription(sub)
+
     return sub
 
 @router.get("/{subscription_id}", response_model=SubscriptionOut)
@@ -73,6 +78,10 @@ def update_subscription(
         setattr(sub, field, value)
     db.commit()
     db.refresh(sub)
+
+    # Update cache
+    cache_subscription(sub)
+
     return sub
 
 @router.delete(
@@ -91,4 +100,8 @@ def delete_subscription(
         )
     db.delete(sub)
     db.commit()
+
+    # Invalidate cache
+    invalidate_subscription(subscription_id)
+
     return

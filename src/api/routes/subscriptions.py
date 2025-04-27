@@ -30,7 +30,16 @@ def create_subscription(
     subscription_in: SubscriptionCreate,
     db: Session = Depends(get_db),
 ):
-    sub = Subscription(**subscription_in.dict())
+    # Convert Pydantic model to dict
+    sub_data = subscription_in.dict()
+
+    # Convert AnyHttpUrl to string before creating SQLAlchemy model 
+    if sub_data.get("target_url"):
+        sub_data["target_url"] = str(sub_data["target_url"])
+
+    # Create SQLAlchemy model instance
+    sub = Subscription(**sub_data)
+
     db.add(sub)
     db.commit()
     db.refresh(sub)
@@ -73,9 +82,17 @@ def update_subscription(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Subscription not found",
         )
+
+    # Get update data, excluding unset fields
     update_data = subscription_in.dict(exclude_unset=True)
+
     for field, value in update_data.items():
-        setattr(sub, field, value)
+        # Convert AnyHttpUrl to string if target_url is being updated
+        if field == "target_url" and value is not None:
+            setattr(sub, field, str(value))
+        else:
+            setattr(sub, field, value) # Set other fields normally
+
     db.commit()
     db.refresh(sub)
 
@@ -104,4 +121,5 @@ def delete_subscription(
     # Invalidate cache
     invalidate_subscription(subscription_id)
 
+    # No return needed for 204
     return

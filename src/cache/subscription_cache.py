@@ -3,6 +3,7 @@ from uuid import UUID
 from src.queue.redis_conn import redis_conn
 from src.db.session import SessionLocal
 from src.models.subscription import Subscription
+from sqlalchemy.orm import Session
 
 CACHE_PREFIX = "subscription:"
 
@@ -20,26 +21,44 @@ def cache_subscription(sub: Subscription) -> None:
         "secret": sub.secret,
         "events": sub.events or [],
     }
-    redis_conn.set(key, json.dumps(data))
+    try:
+        redis_conn.set(key, json.dumps(data))
+    except Exception:
+        # Silently ignore caching failures
+        pass
 
-def get_subscription(subscription_id: UUID | str) -> dict | None:
+def get_subscription(subscription_id: UUID | str, db: Session = None) -> dict | None:
     """
     Return the subscription data dict from Redis if present; otherwise
     load from Postgres, cache it, and return. Returns None if no such
-    subscription exists.
+    subscription exists. Cache failures are silently ignored.
+    
+    Args:
+        subscription_id: The UUID of the subscription to get
+        db: Optional SQLAlchemy session to use. If None, creates a new one.
     """
     sid = str(subscription_id)
     key = _make_key(sid)
 
-    raw = redis_conn.get(key)
-    if raw:
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass  # fall back to DB
+    # 1) Try cache
+    try:
+        raw = redis_conn.get(key)
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # corrupted cache entry; fall back to DB
+                pass
+    except Exception:
+        # Redis unavailable or error → cache miss
+        pass
 
-    # Cache miss → load from DB
-    db = SessionLocal()
+    # 2) Cache miss or error → load from DB
+    session_created = False
+    if db is None:
+        db = SessionLocal()
+        session_created = True
+    
     try:
         sub = db.query(Subscription).get(sid)
         if not sub:
@@ -50,14 +69,22 @@ def get_subscription(subscription_id: UUID | str) -> dict | None:
             "secret": sub.secret,
             "events": sub.events or [],
         }
-        redis_conn.set(key, json.dumps(data))
+        # Try to update cache (best‐effort)
+        try:
+            redis_conn.set(key, json.dumps(data))
+        except Exception:
+            pass
         return data
     finally:
-        db.close()
+        if session_created:
+            db.close()
 
 def invalidate_subscription(subscription_id: UUID | str) -> None:
     """
     Remove a subscription’s cache entry (e.g. on delete).
     """
     key = _make_key(str(subscription_id))
-    redis_conn.delete(key)
+    try:
+        redis_conn.delete(key)
+    except Exception:
+        pass

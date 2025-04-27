@@ -63,7 +63,36 @@ def process_delivery(
             else:
                 outcome = "Failed Attempt"
                 error_details = f"HTTP {status_code}"
-                raise Exception(error_details)
+                logger.error(f"Delivery failed: {error_details}")
+
+                if attempt < MAX_ATTEMPTS:
+                    db.add(
+                        DeliveryLog(
+                            webhook_id=webhook_id,
+                            subscription_id=subscription_id,
+                            target_url=target,
+                            timestamp=datetime.utcnow(),
+                            attempt_number=attempt,
+                            outcome=outcome,
+                            status_code=status_code,
+                            error=error_details,
+                        )
+                    )
+                    db.commit()
+
+                    # Schedule next attempt
+                    delay = BACKOFF_SCHEDULE[attempt - 1]
+                    delivery_queue.enqueue_in(
+                        timedelta(seconds=delay),
+                        process_delivery,
+                        subscription_id,
+                        payload,
+                        event_type,
+                        signature,
+                        webhook_id,
+                        attempt + 1,
+                    )
+                    return
 
         except Exception as exc:
             # Recoverable failure: log & re-enqueue if attempts remain

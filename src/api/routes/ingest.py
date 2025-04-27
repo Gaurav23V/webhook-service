@@ -1,8 +1,9 @@
 import uuid
 from uuid import UUID
-from fastapi import APIRouter, Header, HTTPException, status
-from starlette.requests import Request
+# Import Request and json module
+from fastapi import APIRouter, Header, HTTPException, status, Request
 from starlette.responses import JSONResponse
+import json # Needed for JSONDecodeError
 
 from src.cache.subscription_cache import get_subscription
 from src.queue.redis_conn import delivery_queue
@@ -16,7 +17,7 @@ router = APIRouter()
 )
 async def ingest_webhook(
     subscription_id: UUID,
-    request: Request,
+    request: Request, # Keep using Request to handle potential bad JSON
     x_event_type: str | None = Header(None),
     x_signature: str | None = Header(None),
 ):
@@ -29,7 +30,14 @@ async def ingest_webhook(
         )
 
     # 2) Read payload
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        # If request.json() fails, raise a 400 Bad Request
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body received.",
+        )
 
     # 3) Generate a webhook_id & enqueue first attempt
     webhook_id = uuid.uuid4()

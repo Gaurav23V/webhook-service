@@ -1,16 +1,24 @@
 services:
   db:
-    image: postgres:15 # Use a specific version of the official Postgres image
-    container_name: webhook_db # Give the container a specific name
+    image: postgres:15-alpine # Using alpine for smaller size
+    container_name: webhook_db
     environment:
-      POSTGRES_USER: postgres # Username used in your DATABASE_URL
-      POSTGRES_PASSWORD: postgres # Password used in your DATABASE_URL
-      POSTGRES_DB: webhook_svc # Database name used in your DATABASE_URL
+      # These should match the defaults or values in your .env file
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-webhook_svc}
     ports:
-      - "5432:5432" # Map port 5432 on your host to port 5432 in the container
+      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data # Persist database data using a named volume
-      
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Checks if Postgres is ready to accept commands
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-webhook_svc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   redis:
     image: redis:6-alpine
     container_name: webhook_redis
@@ -18,7 +26,50 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      # Checks if Redis is responding to pings
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build: . # Build the image from the Dockerfile in the current directory
+    container_name: webhook_api
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload # Add --reload for development
+    ports:
+      - "8000:8000" # Map host 8000 to container 8000
+    volumes:
+      # Mount source code for live reload during development
+      # Note: This overrides the code copied in the Dockerfile image layer
+      - ./src:/app/src
+    env_file:
+      - .env # Load environment variables from .env file
+    depends_on:
+      db:
+        condition: service_healthy # Wait for db healthcheck to pass
+      redis:
+        condition: service_healthy # Wait for redis healthcheck to pass
+    restart: unless-stopped
+
+  worker:
+    build: . # Use the same image built for the api service
+    container_name: webhook_worker
+    # Override the default CMD to run the RQ worker
+    command: rq worker deliveries
+    volumes:
+      # Mount source code so worker picks up changes too
+      - ./src:/app/src
+    env_file:
+      - .env # Load environment variables from .env file
+    depends_on:
+      db:
+        condition: service_healthy # Wait for db healthcheck to pass
+      redis:
+        condition: service_healthy # Wait for redis healthcheck to pass
+    restart: unless-stopped # Restart if it crashes
 
 volumes:
-  postgres_data: {} # Define the named volume for data persistence
-  redis_data: {}    # Add a volume for Redis data
+  postgres_data: {}
+  redis_data: {}

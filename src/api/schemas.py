@@ -21,7 +21,7 @@ class SubscriptionOut(SubscriptionBase):
     id: UUID
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class DeliveryAttempt(BaseModel):
     id: UUID
@@ -35,7 +35,7 @@ class DeliveryAttempt(BaseModel):
     error: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class StatusResponse(BaseModel):
     webhook_id: UUID
@@ -48,4 +48,4 @@ class StatusResponse(BaseModel):
     recent_attempts: List[DeliveryAttempt]
 
     class Config:
-        orm_mode = True
+        from_attributes = True

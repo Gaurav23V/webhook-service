@@ -1,18 +1,19 @@
+# docker-compose.yml
+
 services:
   db:
-    image: postgres:15-alpine # Using alpine for smaller size
+    image: postgres:15-alpine
     container_name: webhook_db
     environment:
-      # These should match the defaults or values in your .env file
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-webhook_svc}
-    ports:
-      - "5432:5432"
+    # No ports needed for managed DB on Render
+    # ports:
+    #  - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      # Checks if Postgres is ready to accept commands
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-webhook_svc}"]
       interval: 5s
       timeout: 5s
@@ -22,12 +23,12 @@ services:
   redis:
     image: redis:6-alpine
     container_name: webhook_redis
-    ports:
-      - "6379:6379"
+    # No ports needed for managed Redis on Render
+    # ports:
+    #  - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      # Checks if Redis is responding to pings
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
@@ -35,41 +36,63 @@ services:
     restart: unless-stopped
 
   api:
-    build: . # Build the image from the Dockerfile in the current directory
+    build: .
     container_name: webhook_api
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload # Add --reload for development
-    ports:
-      - "8000:8000" # Map host 8000 to container 8000
-    volumes:
-      # Mount source code for live reload during development
-      # Note: This overrides the code copied in the Dockerfile image layer
-      - ./src:/app/src
+    # Command to run the API server (no --reload in production)
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    # No host port mapping needed if accessed internally or via Render's LB
+    # ports:
+    #  - "8000:8000"
+    # No volumes needed in production deployment
+    # volumes:
+    #  - ./src:/app/src
     env_file:
-      - .env # Load environment variables from .env file
+      - .env
     depends_on:
       db:
-        condition: service_healthy # Wait for db healthcheck to pass
+        condition: service_healthy
       redis:
-        condition: service_healthy # Wait for redis healthcheck to pass
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
-    build: . # Use the same image built for the api service
+    build: .
     container_name: webhook_worker
-    # Override the default CMD to run the RQ worker
     command: rq worker deliveries
-    volumes:
-      # Mount source code so worker picks up changes too
-      - ./src:/app/src
+    # No volumes needed in production deployment
+    # volumes:
+    #  - ./src:/app/src
     env_file:
-      - .env # Load environment variables from .env file
+      - .env
     depends_on:
       db:
-        condition: service_healthy # Wait for db healthcheck to pass
+        condition: service_healthy
       redis:
-        condition: service_healthy # Wait for redis healthcheck to pass
-    restart: unless-stopped # Restart if it crashes
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- NEW UI Service ---
+  ui:
+    build: . # Use the same image
+    container_name: webhook_ui
+    # Command to run streamlit, exposing it on all interfaces within container
+    command: streamlit run ui/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      # Map Render's external port (default 10000) to Streamlit's port
+      - "10000:8501"
+    # No volumes needed in production deployment
+    # volumes:
+    #  - ./ui:/app/ui
+    env_file:
+      - .env # Needs API_BASE_URL from env
+    depends_on:
+      # Doesn't strictly depend on DB/Redis, but needs API conceptually
+      # Render might require depends_on for service discovery if API_BASE_URL uses service name
+      - api
+    restart: unless-stopped
+  # --- END UI Service ---
 
 volumes:
   postgres_data: {}
   redis_data: {}
+

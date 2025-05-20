@@ -92,6 +92,7 @@ Two main tables are used:
     ```bash
     conda create -n venv python=3.10
     pip install -r requirements.txt
+    conda activate venv
     ```
 
 ## Running Locally (Docker Compose)

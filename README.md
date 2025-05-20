@@ -90,8 +90,7 @@ Two main tables are used:
 
 3.  **(Optional) Python Virtual Environment:** If you plan to run the Streamlit UI locally *without* Docker Compose managing it:
     ```bash
-    python -m venv venv
-    source venv/bin/activate # On Windows use `venv\Scripts\activate`
+    conda create -n venv python=3.10
     pip install -r requirements.txt
     ```
 
@@ -225,6 +224,8 @@ The project includes a test suite using `pytest`. Tests cover API endpoints, wor
 2.  **Set Python Path:** Before running tests, ensure the project root is in the Python path:
     ```bash
     export PYTHONPATH=$(pwd):$PYTHONPATH
+    export REDIS_URL=redis://localhost:6379/0
+    export DATABASE_URL=postgresql:/postgres:postgres@localhost:5432/webhook_svc
     ```
 3.  **Run Tests:**
     ```bash

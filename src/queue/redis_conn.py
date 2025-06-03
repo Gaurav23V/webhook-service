@@ -1,5 +1,4 @@
 import os
-from dotenv import load_dotenv
 import redis
 from rq import Queue
 
@@ -15,6 +14,3 @@ def get_redis() -> redis.Redis:
     """FastAPI dependency that provides a Redis connection."""
     # For now, return the globally configured connection
     return redis_conn_global
-
-# Keep alias for compatibility if needed elsewhere
-redis_conn = redis_conn_global

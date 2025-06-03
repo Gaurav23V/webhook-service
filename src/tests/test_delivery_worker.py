@@ -1,12 +1,15 @@
 import uuid
 from datetime import datetime, timedelta
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
+import asyncio
 
-import requests
+import httpx
+from sqlalchemy import select
 
 from src.workers.delivery_worker import (
     process_delivery,
+    process_delivery_sync,
     MAX_ATTEMPTS,
     BACKOFF_SCHEDULE,
 )
@@ -22,34 +25,48 @@ TEST_EVENT_TYPE = "test.event"
 TEST_SIGNATURE = "sha256=test"
 
 @pytest.fixture
-def test_sub(db_session):
+async def test_sub(async_db_session):
     """Creates a subscription and caches it for worker tests."""
     sub = Subscription(target_url=TEST_URL, secret="test_secret")
-    db_session.add(sub)
-    db_session.commit() # Commit here as worker runs in separate 'transaction'
-    db_session.refresh(sub)
+    async_db_session.add(sub)
+    await async_db_session.commit() # Commit here as worker runs in separate 'transaction'
+    await async_db_session.refresh(sub)
     cache_subscription(sub) # Ensure it's in cache for the worker
     return sub
 
-def test_process_delivery_success(
-    test_sub, db_session, mocker # Use mocker fixture from pytest-mock
+@pytest.mark.asyncio
+async def test_process_delivery_success(
+    test_sub, async_db_session, mocker # Use async session
 ):
     """Test successful delivery on the first attempt."""
     webhook_id = uuid.uuid4()
     subscription_id = test_sub.id
 
-    # Mock requests.post to return a successful response
-    mock_response = MagicMock(spec=requests.Response)
+    # Mock AsyncSessionLocal to return our test session
+    mock_session_context = AsyncMock()
+    mock_session_context.__aenter__.return_value = async_db_session
+    mock_session_context.__aexit__.return_value = None
+    mocker.patch("src.workers.delivery_worker.AsyncSessionLocal", return_value=mock_session_context)
+
+    # Mock httpx.AsyncClient instead of requests.post
+    mock_response = MagicMock()
     mock_response.status_code = 200
-    mocker.patch("requests.post", return_value=mock_response)
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    
+    # Mock the context manager
+    mock_async_client = AsyncMock()
+    mock_async_client.__aenter__.return_value = mock_client
+    mock_async_client.__aexit__.return_value = None
+    mocker.patch("httpx.AsyncClient", return_value=mock_async_client)
 
     # Mock the enqueue_in method (it shouldn't be called on success)
     mock_enqueue_in = mocker.patch(
-        "src.queue.redis_conn.delivery_queue.enqueue_in"
+        "src.workers.delivery_worker.delivery_queue.enqueue_in"
     )
 
     # Execute the worker function
-    process_delivery(
+    await process_delivery(
         subscription_id=subscription_id,
         payload=TEST_PAYLOAD,
         event_type=TEST_EVENT_TYPE,
@@ -59,54 +76,64 @@ def test_process_delivery_success(
     )
 
     # Assertions
-    # 1. requests.post was called correctly
-    requests.post.assert_called_once_with(
+    # 1. httpx.AsyncClient.post was called correctly
+    mock_client.post.assert_called_once_with(
         TEST_URL,
         json=TEST_PAYLOAD,
         headers={
             "Content-Type": "application/json",
             "X-Event-Type": TEST_EVENT_TYPE,
-            "X-Signature": TEST_SIGNATURE, # Assuming signature is passed through
+            "X-Signature": TEST_SIGNATURE,
         },
-        timeout=mocker.ANY, # Check timeout exists, value checked elsewhere
     )
 
     # 2. No retry was scheduled
     mock_enqueue_in.assert_not_called()
 
     # 3. Success log entry was created
-    log = db_session.query(DeliveryLog).filter_by(webhook_id=webhook_id).one()
+    result = await async_db_session.execute(
+        select(DeliveryLog).where(DeliveryLog.webhook_id == webhook_id)
+    )
+    log = result.scalar_one()
     assert log.subscription_id == subscription_id
     assert log.attempt_number == 1
     assert log.outcome == "Success"
     assert log.status_code == 200
     assert log.error is None
 
-def test_process_delivery_retry_on_failure(
-    test_sub, db_session, delivery_queue, mocker # Need delivery_queue fixture
+@pytest.mark.asyncio
+async def test_process_delivery_retry_on_http_failure(
+    test_sub, async_db_session, delivery_queue, mocker
 ):
     """Test failure (non-2xx) leading to a retry."""
     webhook_id = uuid.uuid4()
     subscription_id = test_sub.id
     initial_attempt = 1
 
-    # Mock requests.post to return a server error
-    mock_response = MagicMock(spec=requests.Response)
+    # Mock AsyncSessionLocal to return our test session
+    mock_session_context = AsyncMock()
+    mock_session_context.__aenter__.return_value = async_db_session
+    mock_session_context.__aexit__.return_value = None
+    mocker.patch("src.workers.delivery_worker.AsyncSessionLocal", return_value=mock_session_context)
+
+    # Mock httpx to return a server error
+    mock_response = MagicMock()
     mock_response.status_code = 503
-    # Raise exception for non-2xx status codes to mimic requests behavior
-    mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
-        "Service Unavailable", response=mock_response
-    )
-    mocker.patch("requests.post", return_value=mock_response)
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    
+    mock_async_client = AsyncMock()
+    mock_async_client.__aenter__.return_value = mock_client
+    mock_async_client.__aexit__.return_value = None
+    mocker.patch("httpx.AsyncClient", return_value=mock_async_client)
 
     # Mock the enqueue_in method to capture arguments
     mock_enqueue_in = mocker.patch(
-        "src.queue.redis_conn.delivery_queue.enqueue_in"
+        "src.workers.delivery_worker.delivery_queue.enqueue_in"
     )
 
     # Execute the worker function for the first attempt
-    # It should raise the exception internally but handle it for retry
-    process_delivery(
+    await process_delivery(
         subscription_id=subscription_id,
         payload=TEST_PAYLOAD,
         event_type=TEST_EVENT_TYPE,
@@ -116,61 +143,63 @@ def test_process_delivery_retry_on_failure(
     )
 
     # Assertions
-    # 1. requests.post was called
-    requests.post.assert_called_once()
+    # 1. httpx post was called
+    mock_client.post.assert_called_once()
 
-    # 2. Retry *was* scheduled with correct parameters
+    # 2. Retry was scheduled with correct parameters
     expected_delay = timedelta(seconds=BACKOFF_SCHEDULE[initial_attempt - 1])
     mock_enqueue_in.assert_called_once_with(
         expected_delay,
-        process_delivery, # The function itself
-        subscription_id,
+        process_delivery_sync, # Should call sync wrapper
+        str(subscription_id), # Should be string
         TEST_PAYLOAD,
         TEST_EVENT_TYPE,
         TEST_SIGNATURE,
-        webhook_id,
-        initial_attempt + 1, # Next attempt number
+        str(webhook_id), # Should be string
+        initial_attempt + 1,
     )
 
     # 3. "Failed Attempt" log entry was created
-    log = db_session.query(DeliveryLog).filter_by(webhook_id=webhook_id).one()
+    result = await async_db_session.execute(
+        select(DeliveryLog).where(DeliveryLog.webhook_id == webhook_id)
+    )
+    log = result.scalar_one()
     assert log.subscription_id == subscription_id
     assert log.attempt_number == initial_attempt
     assert log.outcome == "Failed Attempt"
-    assert log.status_code == 503 # Status code should be logged
-    assert "503" in log.error # Error details should contain status
+    assert log.status_code == 503
+    assert "HTTP 503" in log.error
 
-def test_process_delivery_retry_on_timeout(
-    test_sub, db_session, delivery_queue, mocker
+@pytest.mark.asyncio
+async def test_process_delivery_retry_on_timeout(
+    test_sub, async_db_session, delivery_queue, mocker
 ):
     """Test failure (timeout) leading to a retry."""
     webhook_id = uuid.uuid4()
     subscription_id = test_sub.id
     initial_attempt = 2 # Simulate a later attempt
 
-    # Mock requests.post to raise a Timeout exception
-    mocker.patch(
-        "requests.post",
-        side_effect=requests.exceptions.Timeout("Connection timed out")
-    )
+    # Mock AsyncSessionLocal to return our test session
+    mock_session_context = AsyncMock()
+    mock_session_context.__aenter__.return_value = async_db_session
+    mock_session_context.__aexit__.return_value = None
+    mocker.patch("src.workers.delivery_worker.AsyncSessionLocal", return_value=mock_session_context)
+
+    # Mock httpx to raise a timeout exception
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = httpx.TimeoutException("Connection timed out")
+    
+    mock_async_client = AsyncMock()
+    mock_async_client.__aenter__.return_value = mock_client
+    mock_async_client.__aexit__.return_value = None
+    mocker.patch("httpx.AsyncClient", return_value=mock_async_client)
 
     mock_enqueue_in = mocker.patch(
         "src.workers.delivery_worker.delivery_queue.enqueue_in"
     )
-    
-    # Mock get_subscription to avoid Redis dependency
-    mocker.patch(
-        "src.workers.delivery_worker.get_subscription", 
-        return_value={
-            "id": str(subscription_id),
-            "target_url": "http://test-target.local",
-            "secret": "test_secret",
-            "events": []
-        }
-    )
 
     # Execute the worker function
-    process_delivery(
+    await process_delivery(
         subscription_id=subscription_id,
         payload=TEST_PAYLOAD,
         event_type=TEST_EVENT_TYPE,
@@ -180,83 +209,60 @@ def test_process_delivery_retry_on_timeout(
     )
 
     # Assertions
-    # 1. requests.post was called
-    requests.post.assert_called_once()
+    # 1. httpx post was called
+    mock_client.post.assert_called_once()
 
     # 2. Retry was scheduled
     expected_delay = timedelta(seconds=BACKOFF_SCHEDULE[initial_attempt - 1])
     mock_enqueue_in.assert_called_once_with(
         expected_delay,
-        process_delivery,
-        subscription_id,
+        process_delivery_sync,
+        str(subscription_id),
         TEST_PAYLOAD,
         TEST_EVENT_TYPE,
         TEST_SIGNATURE,
-        webhook_id,
+        str(webhook_id),
         initial_attempt + 1,
     )
 
     # 3. "Failed Attempt" log entry was created for timeout
-    log = db_session.query(DeliveryLog).filter_by(webhook_id=webhook_id).one()
+    result = await async_db_session.execute(
+        select(DeliveryLog).where(DeliveryLog.webhook_id == webhook_id)
+    )
+    log = result.scalar_one()
     assert log.subscription_id == subscription_id
     assert log.attempt_number == initial_attempt
     assert log.outcome == "Failed Attempt"
     assert log.status_code is None # No status code on timeout
     assert "Connection timed out" in log.error
 
-def test_process_delivery_retry_on_failure(
-    test_sub, db_session, delivery_queue, mocker
-):
-    """Test failure (non-2xx) leading to a retry."""
+def test_process_delivery_sync_wrapper(mocker):
+    """Test the synchronous wrapper function."""
     webhook_id = uuid.uuid4()
-    subscription_id = test_sub.id
-    initial_attempt = 1
+    subscription_id = uuid.uuid4()  # Just use a generated UUID
 
-    # Mock requests.post to return a server error
-    mock_response = MagicMock(spec=requests.Response)
-    mock_response.status_code = 503
-    mocker.patch("requests.post", return_value=mock_response)
-
-    mock_enqueue_in = mocker.patch(
-        "src.workers.delivery_worker.delivery_queue.enqueue_in"
+    # Mock the async function
+    mock_async_process = mocker.patch(
+        "src.workers.delivery_worker.process_delivery", 
+        new_callable=AsyncMock
     )
 
-    # Mock get_subscription to avoid Redis dependency
-    mocker.patch(
-        "src.workers.delivery_worker.get_subscription", 
-        return_value={
-            "id": str(subscription_id),
-            "target_url": "http://test-target.local",
-            "secret": "test_secret",
-            "events": []
-        }
-    )
-
-    # Execute the worker function for the first attempt
-    process_delivery(
+    # Call the sync wrapper
+    process_delivery_sync(
         subscription_id=subscription_id,
         payload=TEST_PAYLOAD,
         event_type=TEST_EVENT_TYPE,
         signature=TEST_SIGNATURE,
         webhook_id=webhook_id,
-        attempt=initial_attempt,
+        attempt=1,
     )
 
-    # Assertions
-    # 1. requests.post was called
-    requests.post.assert_called_once()
-
-    # 2. Retry was scheduled
-    mock_enqueue_in.assert_called_once()
-    
-    # Check retry args
-    args = mock_enqueue_in.call_args[0]
-    assert args[7] == initial_attempt + 1
-    
-    # 3. Log entry was created
-    log = db_session.query(DeliveryLog).filter_by(webhook_id=webhook_id).one()
-    assert log.subscription_id == subscription_id
-    assert log.attempt_number == initial_attempt
-    assert log.outcome == "Failed Attempt"
-    assert log.status_code == 503
-    assert "HTTP 503" in log.error
+    # Verify the async function was called
+    mock_async_process.assert_called_once_with(
+        subscription_id,
+        TEST_PAYLOAD,
+        TEST_EVENT_TYPE,
+        TEST_SIGNATURE,
+        webhook_id,
+        1,
+    )

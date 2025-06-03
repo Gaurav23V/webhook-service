@@ -1,35 +1,34 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from uuid import UUID
 from typing import List
 
-from src.db.session import SessionLocal
+from src.db.session import AsyncSessionLocal
 from src.models.delivery_log import DeliveryLog
 from src.api.schemas import DeliveryAttempt, StatusResponse
 
 router = APIRouter()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_async_db():
+    async with AsyncSessionLocal() as session:
+        yield session
 
 @router.get(
     "/status/{webhook_id}",
     response_model=StatusResponse,
     summary="Get delivery status and recent attempts for a webhook",
 )
-def get_webhook_status(
+async def get_webhook_status(
     webhook_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
 ):
     # 1) total count
-    total = db.query(func.count(DeliveryLog.id)) \
-              .filter(DeliveryLog.webhook_id == webhook_id) \
-              .scalar()
+    total = await db.scalar(
+        select(func.count(DeliveryLog.id))
+        .where(DeliveryLog.webhook_id == webhook_id)
+    )
     if total == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -37,13 +36,13 @@ def get_webhook_status(
         )
 
     # 2) recent attempts (most recent first, up to 20)
-    logs = (
-        db.query(DeliveryLog)
-          .filter(DeliveryLog.webhook_id == webhook_id)
-          .order_by(DeliveryLog.timestamp.desc())
-          .limit(20)
-          .all()
+    logs = await db.execute(
+        select(DeliveryLog)
+        .where(DeliveryLog.webhook_id == webhook_id)
+        .order_by(DeliveryLog.timestamp.desc())
+        .limit(20)
     )
+    logs = logs.scalars().all()
 
     last = logs[0]
     return {
@@ -62,16 +61,15 @@ def get_webhook_status(
     response_model=List[DeliveryAttempt],
     summary="List recent delivery attempts for a subscription",
 )
-def list_subscription_attempts(
+async def list_subscription_attempts(
     subscription_id: UUID,
     limit: int = 20,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
 ):
-    logs = (
-        db.query(DeliveryLog)
-          .filter(DeliveryLog.subscription_id == subscription_id)
-          .order_by(DeliveryLog.timestamp.desc())
-          .limit(limit)
-          .all()
+    logs = await db.execute(
+        select(DeliveryLog)
+        .where(DeliveryLog.subscription_id == subscription_id)
+        .order_by(DeliveryLog.timestamp.desc())
+        .limit(limit)
     )
-    return logs
+    return logs.scalars().all()

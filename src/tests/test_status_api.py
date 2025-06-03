@@ -6,11 +6,11 @@ from src.models.subscription import Subscription
 from src.models.delivery_log import DeliveryLog
 
 @pytest.fixture
-def setup_logs(db_session):
+async def setup_logs(async_db_session):
     # Create subscription
     sub_id = uuid.uuid4()
     sub = Subscription(id=sub_id, target_url="http://status-test.local")
-    db_session.add(sub)
+    async_db_session.add(sub)
     
     # Create webhook IDs
     wh_id_success = uuid.uuid4()
@@ -60,18 +60,18 @@ def setup_logs(db_session):
             error=None
         )
     ]
-    db_session.add_all(logs)
-    db_session.commit()
+    async_db_session.add_all(logs)
+    await async_db_session.commit()
     
     return {"sub_id": sub_id, "wh_id_success": wh_id_success, "wh_id_fail": wh_id_fail}
 
 
-def test_get_webhook_status_success(client, setup_logs):
+async def test_get_webhook_status_success(client, setup_logs):
     """Test getting status for a webhook that succeeded."""
     wh_id = setup_logs["wh_id_success"]
     sub_id = setup_logs["sub_id"]
 
-    r = client.get(f"/status/{wh_id}")
+    r = await client.get(f"/status/{wh_id}")
     assert r.status_code == 200
     data = r.json()
 
@@ -84,12 +84,12 @@ def test_get_webhook_status_success(client, setup_logs):
     assert len(data["recent_attempts"]) == 1
     assert data["recent_attempts"][0]["outcome"] == "Success"
 
-def test_get_webhook_status_failure(client, setup_logs):
+async def test_get_webhook_status_failure(client, setup_logs):
     """Test getting status for a webhook that ultimately failed."""
     wh_id = setup_logs["wh_id_fail"]
     sub_id = setup_logs["sub_id"]
 
-    r = client.get(f"/status/{wh_id}")
+    r = await client.get(f"/status/{wh_id}")
     assert r.status_code == 200
     data = r.json()
 
@@ -108,18 +108,18 @@ def test_get_webhook_status_failure(client, setup_logs):
     assert data["recent_attempts"][1]["attempt_number"] == 2
     assert data["recent_attempts"][2]["attempt_number"] == 1
 
-def test_get_webhook_status_not_found(client):
+async def test_get_webhook_status_not_found(client):
     """Test getting status for a non-existent webhook ID."""
     non_existent_id = uuid.uuid4()
-    r = client.get(f"/status/{non_existent_id}")
+    r = await client.get(f"/status/{non_existent_id}")
     assert r.status_code == 404
     assert "No delivery logs" in r.json()["detail"]
 
-def test_list_subscription_attempts(client, setup_logs):
+async def test_list_subscription_attempts(client, setup_logs):
     """Test listing recent attempts for a subscription."""
     sub_id = setup_logs["sub_id"]
 
-    r = client.get(f"/subscriptions/{sub_id}/attempts?limit=10")
+    r = await client.get(f"/subscriptions/{sub_id}/attempts?limit=10")
     assert r.status_code == 200
     data = r.json()
 
@@ -133,11 +133,11 @@ def test_list_subscription_attempts(client, setup_logs):
     assert data[3]["webhook_id"] == str(setup_logs["wh_id_success"])
     assert data[3]["attempt_number"] == 1
 
-def test_list_subscription_attempts_limit(client, setup_logs):
+async def test_list_subscription_attempts_limit(client, setup_logs):
     """Test the limit parameter for subscription attempts."""
     sub_id = setup_logs["sub_id"]
 
-    r = client.get(f"/subscriptions/{sub_id}/attempts?limit=2")
+    r = await client.get(f"/subscriptions/{sub_id}/attempts?limit=2")
     assert r.status_code == 200
     data = r.json()
     assert len(data) == 2
@@ -145,13 +145,13 @@ def test_list_subscription_attempts_limit(client, setup_logs):
     assert data[0]["attempt_number"] == 3
     assert data[1]["attempt_number"] == 2
 
-def test_list_subscription_attempts_no_logs(client, db_session):
+async def test_list_subscription_attempts_no_logs(client, async_db_session):
     """Test listing attempts for a subscription with no logs."""
     # Create a subscription but no logs
     sub = Subscription(target_url="http://no-logs-here.com")
-    db_session.add(sub)
-    db_session.commit()
+    async_db_session.add(sub)
+    await async_db_session.commit()
 
-    r = client.get(f"/subscriptions/{sub.id}/attempts")
+    r = await client.get(f"/subscriptions/{sub.id}/attempts")
     assert r.status_code == 200
     assert r.json() == [] # Expect an empty list

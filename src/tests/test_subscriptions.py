@@ -1,11 +1,11 @@
-def test_subscription_crud_flow(client):
+async def test_subscription_crud_flow(client):
     # Create
     payload = {
         "target_url": "https://example.com/hook",
         "secret": "s3cr3t",
         "events": ["order.created"]
     }
-    r = client.post("/subscriptions/", json=payload)
+    r = await client.post("/subscriptions/", json=payload)
     assert r.status_code == 201
     sub = r.json()
     sub_id = sub["id"]
@@ -14,13 +14,13 @@ def test_subscription_crud_flow(client):
     assert sub["events"] == payload["events"]
 
     # Read
-    r = client.get(f"/subscriptions/{sub_id}")
+    r = await client.get(f"/subscriptions/{sub_id}")
     assert r.status_code == 200
     assert r.json() == sub
 
     # Update
     upd = {"target_url": "https://example.org/updated"}
-    r = client.patch(f"/subscriptions/{sub_id}", json=upd)
+    r = await client.patch(f"/subscriptions/{sub_id}", json=upd)
     assert r.status_code == 200
     updated = r.json()
     assert updated["target_url"] == upd["target_url"]
@@ -28,15 +28,15 @@ def test_subscription_crud_flow(client):
     assert updated["events"] == payload["events"]
 
     # List
-    r = client.get("/subscriptions/")
+    r = await client.get("/subscriptions/")
     assert r.status_code == 200
     arr = r.json()
     assert any(item["id"] == sub_id for item in arr)
 
     # Delete
-    r = client.delete(f"/subscriptions/{sub_id}")
+    r = await client.delete(f"/subscriptions/{sub_id}")
     assert r.status_code == 204
 
     # Confirm gone
-    r = client.get(f"/subscriptions/{sub_id}")
+    r = await client.get(f"/subscriptions/{sub_id}")
     assert r.status_code == 404

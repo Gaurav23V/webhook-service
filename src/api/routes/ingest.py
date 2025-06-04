@@ -1,9 +1,8 @@
 import uuid
 from uuid import UUID
-# Import Request and json module
 from fastapi import APIRouter, Header, HTTPException, status, Request
 from starlette.responses import JSONResponse
-import json # Needed for JSONDecodeError
+import json
 
 from src.cache.subscription_cache import get_subscription
 from src.queue.redis_conn import delivery_queue
@@ -17,12 +16,12 @@ router = APIRouter()
 )
 async def ingest_webhook(
     subscription_id: UUID,
-    request: Request, # Keep using Request to handle potential bad JSON
+    request: Request,
     x_event_type: str | None = Header(None),
     x_signature: str | None = Header(None),
 ):
     # 1) Cache-first lookup (falls back to DB if needed)
-    sub_data = get_subscription(subscription_id)
+    sub_data = await get_subscription(subscription_id)
     if not sub_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -42,7 +41,7 @@ async def ingest_webhook(
     # 3) Generate a webhook_id & enqueue first attempt
     webhook_id = uuid.uuid4()
     delivery_queue.enqueue(
-        "src.workers.delivery_worker.process_delivery",
+        "src.workers.delivery_worker.process_delivery_sync",
         subscription_id,
         payload,
         x_event_type,

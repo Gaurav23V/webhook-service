@@ -5,9 +5,10 @@ import requests
 import pandas as pd
 import uuid
 from datetime import datetime
+import os
 
 # --- Configuration ---
-API_BASE_URL = "http://localhost:8000" # Assuming FastAPI runs on port 8000 locally
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 st.set_page_config(page_title="Webhook Service UI", layout="wide")
 st.title("Webhook Delivery Service - Minimal UI")
 
